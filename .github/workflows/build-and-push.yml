@@ -1,0 +1,44 @@
+name: Build and push demo API image
+
+# Runs on every merge to main, and can also be started by hand from the Actions tab
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@v4
+
+      # Learner Lab cannot create IAM roles, so this uses session credentials
+      # stored as repository secrets. They must be refreshed each lab session.
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: us-east-1
+
+      - name: Log in to Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # Tag with the short commit SHA, never "latest" (the repository is immutable)
+      - name: Build and push the image
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+        run: |
+          TAG="${GITHUB_SHA::7}"
+          IMAGE="$REGISTRY/demo-api:$TAG"
+          docker build --platform linux/amd64 -t "$IMAGE" .
+          docker push "$IMAGE"
+          echo "Pushed $IMAGE"
+          echo "image=$IMAGE" >> "$GITHUB_STEP_SUMMARY"
+
+      # Placeholder: in Sprint 2 this step will start the SafeMerge deploy gate
+      - name: Start the deploy gate (not built yet)
+        run: echo "Deploy gate will be triggered here once it exists"
