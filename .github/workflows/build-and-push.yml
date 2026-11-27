@@ -1,13 +1,23 @@
 name: Build and push demo API image
 
-# Runs on every merge to main, and can also be started by hand from the Actions tab
+# Runs on every merge to main, and can also be started by hand from the Actions tab.
+# It also runs when a commit status arrives (the "status" event): the production deploy job
+# below uses that to deploy only after the SafeMerge deploy gate has passed. A status event
+# always runs this file from the default branch.
 on:
   push:
     branches: [main]
   workflow_dispatch:
+  status:
+
+env:
+  AWS_REGION: us-east-1
+  GATE_NAME: sm-prod-deploy-gate
 
 jobs:
   build-and-push:
+    # Statuses from SAST or the gate itself must not rebuild the image
+    if: github.event_name != 'status'
     runs-on: ubuntu-latest
     steps:
       - name: Check out the code
@@ -29,6 +39,7 @@ jobs:
 
       # Tag with the short commit SHA, never "latest" (the repository is immutable)
       - name: Build and push the image
+        id: build
         env:
           REGISTRY: ${{ steps.ecr.outputs.registry }}
         run: |
@@ -37,8 +48,44 @@ jobs:
           docker build --platform linux/amd64 -t "$IMAGE" .
           docker push "$IMAGE"
           echo "Pushed $IMAGE"
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
           echo "image=$IMAGE" >> "$GITHUB_STEP_SUMMARY"
 
-      # Placeholder: in Sprint 2 this step will start the SafeMerge deploy gate
-      - name: Start the deploy gate (not built yet)
-        run: echo "Deploy gate will be triggered here once it exists"
+      # Starts the gate and does not wait for it. The gate runs staging and the pentest,
+      # then posts the safemerge/deploy-gate commit status on this commit.
+      # commitSha is the full 40-character sha (the notifier needs it), the image tag is short.
+      - name: Start the deploy gate
+        env:
+          IMAGE: ${{ steps.build.outputs.image }}
+        run: |
+          set -euo pipefail
+          ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
+          STATE_MACHINE_ARN="arn:aws:states:${AWS_REGION}:${ACCOUNT_ID}:stateMachine:${GATE_NAME}"
+          INPUT="$(jq -n --arg repo "$GITHUB_REPOSITORY" --arg sha "$GITHUB_SHA" --arg image "$IMAGE" \
+            '{repo: $repo, commitSha: $sha, image: $image, mode: "deploy"}')"
+          echo "$INPUT"
+          EXECUTION_ARN="$(aws stepfunctions start-execution \
+            --state-machine-arn "$STATE_MACHINE_ARN" \
+            --name "deploy-${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            --input "$INPUT" \
+            --query executionArn --output text)"
+          echo "Started the deploy gate: $EXECUTION_ARN"
+          echo "gate_execution=$EXECUTION_ARN" >> "$GITHUB_STEP_SUMMARY"
+
+  # Runs only when the deploy gate reports success for the commit at the head of main.
+  # If a newer commit has landed since, that commit has its own gate run, so this one is skipped.
+  deploy-production:
+    if: >-
+      github.event_name == 'status' &&
+      github.event.context == 'safemerge/deploy-gate' &&
+      github.event.state == 'success' &&
+      github.event.sha == github.sha
+    runs-on: ubuntu-latest
+    steps:
+      # Placeholder: there is no production target for the demo app yet
+      - name: Deploy to production
+        env:
+          GATE_SHA: ${{ github.event.sha }}
+        run: |
+          echo "Deploy gate passed for $GATE_SHA"
+          echo "Would deploy demo-api:${GATE_SHA::7} to production"
